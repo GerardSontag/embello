@@ -11,6 +11,7 @@ const (
 	NAK        = 0x1F
 	GET_CMD    = 0x00
 	GETID_CMD  = 0x02
+	GO_CMD     = 0x21
 	WRITE_CMD  = 0x31
 	ERASE_CMD  = 0x43
 	EXTERA_CMD = 0x44
@@ -25,10 +26,14 @@ var deviceMap = map[uint16]string{
 	0x413: "STM32F4",
 	0x414: "STM32F1, performance, high-density",
 	0x416: "STM32L1, performance, medium-density",
+	0x417: "STM32L0, low-power, category 3",
 	0x418: "STM32F1, connectivity",
 	0x420: "STM32F1, value, medium-density",
+	0x425: "STM32L0, low-power, category 2",
 	0x428: "STM32F1, value, high-density",
 	0x430: "STM32F1, performance, XL-density",
+	0x447: "STM32L0, low-power, category 5",
+	0x457: "STM32L0, low-power, category 0",
 }
 
 var (
@@ -70,12 +75,17 @@ func uploadSTM32(data []byte) {
 	//fmt.Println(" OK")
 
 	fmt.Print("  Mass erase: ")
-	massErase()
+	massErase(len(data))
 	fmt.Println("OK")
 
 	fmt.Print("   Uploading: ")
 	writeFlash(data)
 	fmt.Println(" OK")
+
+	// this won't work if the uploaded coded expects to run in low-mem
+	//fmt.Print("       Start: ")
+	//sendGoCmd()
+	//fmt.Println(" OK")
 }
 
 func getReply() uint8 {
@@ -119,12 +129,34 @@ func wantAck() {
 	checkSum = 0
 }
 
+func wantSlowAck() {
+	r := getReply()
+	for r == 0 {
+		r = getReply()
+	}
+	if r != ACK {
+		fmt.Printf("\nFailed: %02x\n", r)
+		os.Exit(1)
+	}
+	checkSum = 0
+}
+
 func sendByte(b uint8) {
 	if *verbose {
 		fmt.Printf(">%02x", b)
 	}
 	conn.Write([]byte{b})
 	checkSum ^= b
+}
+
+func send2bytes(v int) {
+	sendByte(uint8(v >> 8))
+	sendByte(uint8(v))
+}
+
+func send4bytes(v int) {
+	send2bytes(v >> 16)
+	send2bytes(v)
 }
 
 func sendCmd(cmd uint8) {
@@ -158,18 +190,24 @@ func getChipType() uint16 {
 	return chipType
 }
 
-func massErase() {
+func massErase(size int) {
 	if extended {
 		sendCmd(EXTERA_CMD)
-		sendByte(0xFF)
-		sendByte(0xFF)
-		sendByte(0xFF)
+		// for some reason, a "full" mass erase gets rejected with a NAK
+		//send2bytes(0xFFFF)
+		// ... so erase a list of segments instead, 1 more than needed
+		n := (size+127)/128 + 1 // really? always 128 bytes per segment?
+		n = 200
+		send2bytes(n - 1)
+		for i := 0; i < n; i++ {
+			send2bytes(i)
+		}
 	} else {
 		sendCmd(ERASE_CMD)
 		sendByte(0xFF)
-		sendByte(0x00)
 	}
-	wantAck()
+	sendByte(checkSum)
+	wantSlowAck()
 }
 
 func writeFlash(data []byte) {
@@ -179,11 +217,7 @@ func writeFlash(data []byte) {
 	for offset := 0; offset < len(data); offset += 256 {
 		fmt.Print("+")
 		sendCmd(WRITE_CMD)
-		addr := 0x08000000 + offset
-		sendByte(uint8(addr >> 24))
-		sendByte(uint8(addr >> 16))
-		sendByte(uint8(addr >> 8))
-		sendByte(uint8(addr))
+		send4bytes(0x08000000 + offset)
 		sendByte(checkSum)
 		wantAck()
 		sendByte(256 - 1)
@@ -194,4 +228,11 @@ func writeFlash(data []byte) {
 		wantAck()
 		*verbose = false // verbose mode off after one write, to reduce output
 	}
+}
+
+func sendGoCmd() {
+	sendCmd(GO_CMD)
+	send4bytes(0x08000000)
+	sendByte(checkSum)
+	wantAck()
 }
